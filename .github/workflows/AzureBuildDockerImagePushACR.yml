@@ -1,0 +1,19 @@
+name: Build Linux Container Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - uses: azure/docker-login@v1
+      with:
+        login-server: mycontainer.azurecr.io
+        username: ${{ secrets.REGISTRY_USERNAME }}
+        password: ${{ secrets.REGISTRY_PASSWORD }}
+    - run: |
+        docker build . -t mycontainer.azurecr.io/myapp:${{ github.sha }}
+        docker push mycontainer.azurecr.io/myapp:${{ github.sha }}
