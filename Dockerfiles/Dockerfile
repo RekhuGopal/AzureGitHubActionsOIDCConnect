@@ -1,134 +1,85 @@
-FROM golang:1.10-alpine as builder
+FROM alpine:3.17
 
-ENV \
-  TERM=xterm \
-  BUILD_DATE="2018-05-08" \
-  BUILD_TYPE="stable" \
-  GRAFANA_VERSION="5.1.1" \
-  PHANTOMJS_VERSION="2.11" \
-  TZ='Europe/Berlin'
+LABEL maintainer="NGINX Docker Maintainers <docker-maint@nginx.com>"
 
-# ---------------------------------------------------------------------------------------
+# Define NGINX versions for NGINX Plus and NGINX Plus modules
+# Uncomment this block and the versioned nginxPackages in the main RUN
+# instruction to install a specific release
+# ENV NGINX_VERSION 28
+# ENV NJS_VERSION   0.7.9
+# ENV PKG_RELEASE   1
 
-RUN \
-  apk update --no-cache && \
-  apk upgrade --no-cache && \
-  apk add \
-    ca-certificates curl g++ git make python libuv nodejs nodejs-npm tzdata && \
-  cp /usr/share/zoneinfo/${TZ} /etc/localtime && \
-  echo ${TZ} > /etc/timezone && \
-  echo "export TZ=${TZ}" > /etc/enviroment && \
-  echo "export BUILD_DATE=${BUILD_DATE}" >> /etc/enviroment && \
-  echo "export BUILD_TYPE=${BUILD_TYPE}" >> /etc/enviroment && \
-  echo "export GRAFANA_VERSION=${GRAFANA_VERSION}" >> /etc/enviroment
+# Download certificate and key from the customer portal (https://account.f5.com)
+# and copy to the build context
+RUN --mount=type=secret,id=nginx-crt,dst=cert.pem \
+    --mount=type=secret,id=nginx-key,dst=cert.key \
+    set -x \
+# Create nginx user/group first, to be consistent throughout Docker variants
+    && addgroup -g 101 -S nginx \
+    && adduser -S -D -H -u 101 -h /var/cache/nginx -s /sbin/nologin -G nginx -g nginx nginx \
+# Install the latest release of NGINX Plus and/or NGINX Plus modules
+# Uncomment individual modules if necessary
+# Use versioned packages over defaults to specify a release
+    && nginxPackages=" \
+        nginx-plus \
+        # nginx-plus=${NGINX_VERSION}-${PKG_RELEASE} \
+        # nginx-plus-module-xslt \
+        # nginx-plus-module-xslt=${NGINX_VERSION}-${PKG_RELEASE} \
+        # nginx-plus-module-geoip \
+        # nginx-plus-module-geoip=${NGINX_VERSION}-${PKG_RELEASE} \
+        # nginx-plus-module-image-filter \
+        # nginx-plus-module-image-filter=${NGINX_VERSION}-${PKG_RELEASE} \
+        # nginx-plus-module-perl \
+        # nginx-plus-module-perl=${NGINX_VERSION}-${PKG_RELEASE} \
+        # nginx-plus-module-njs \
+        # nginx-plus-module-njs=${NGINX_VERSION}.${NJS_VERSION}-${PKG_RELEASE} \
+    " \
+    KEY_SHA512="e09fa32f0a0eab2b879ccbbc4d0e4fb9751486eedda75e35fac65802cc9faa266425edf83e261137a2f4d16281ce2c1a5f4502930fe75154723da014214f0655" \
+    && apk add --no-cache --virtual .cert-deps openssl \
+    && wget -O /tmp/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub \
+    && if echo "$KEY_SHA512 */tmp/nginx_signing.rsa.pub" | sha512sum -c -; then \
+        echo "key verification succeeded!"; \
+        mv /tmp/nginx_signing.rsa.pub /etc/apk/keys/; \
+    else \
+        echo "key verification failed!"; \
+        exit 1; \
+    fi \
+    && apk del .cert-deps \
+    && cat cert.pem > /etc/apk/cert.pem \
+    && cat cert.key > /etc/apk/cert.key \
+    && apk add -X "https://pkgs.nginx.com/plus/alpine/v$(egrep -o '^[0-9]+\.[0-9]+' /etc/alpine-release)/main" --no-cache $nginxPackages \
+    && if [ -n "/etc/apk/keys/nginx_signing.rsa.pub" ]; then rm -f /etc/apk/keys/nginx_signing.rsa.pub; fi \
+    && if [ -n "/etc/apk/cert.key" && -n "/etc/apk/cert.pem"]; then rm -f /etc/apk/cert.key /etc/apk/cert.pem; fi \
+# Bring in gettext so we can get `envsubst`, then throw
+# the rest away. To do this, we need to install `gettext`
+# then move `envsubst` out of the way so `gettext` can
+# be deleted completely, then move `envsubst` back.
+    && apk add --no-cache --virtual .gettext gettext \
+    && mv /usr/bin/envsubst /tmp/ \
+    \
+    && runDeps="$( \
+        scanelf --needed --nobanner /tmp/envsubst \
+            | awk '{ gsub(/,/, "\nso:", $2); print "so:" $2 }' \
+            | sort -u \
+            | xargs -r apk info --installed \
+            | sort -u \
+    )" \
+    && apk add --no-cache $runDeps \
+    && apk del .gettext \
+    && mv /tmp/envsubst /usr/local/bin/ \
+# Bring in tzdata so users could set the timezones through the environment
+# variables
+    && apk add --no-cache tzdata \
+# Bring in curl and ca-certificates to make registering on DNS SD easier
+    && apk add --no-cache curl ca-certificates \
+# Forward request and error logs to Docker log collector
+    && ln -sf /dev/stdout /var/log/nginx/access.log \
+    && ln -sf /dev/stderr /var/log/nginx/error.log
 
-RUN \
-  # download and install phantomJS
-  echo "get phantomjs ${PHANTOMJS_VERSION} from external ressources ..." && \
-  curl \
-    --silent \
-    --location \
-    --retry 3 \
-    https://github.com/Overbryd/docker-phantomjs-alpine/releases/download/${PHANTOMJS_VERSION}/phantomjs-alpine-x86_64.tar.bz2 \
-  | bunzip2 \
-  | tar x -C / && \
-  ln -s /phantomjs/phantomjs /usr/bin/
+EXPOSE 80
 
-RUN \
-  export GOPATH=/opt/go && \
-  # export GOROOT=/usr/lib/go && \
-  export GOMAXPROCS=4 && \
-  # build and install grafana
-  echo "get grafana sources ..." && \
-  go get github.com/grafana/grafana || true && \
-  cd ${GOPATH}/src/github.com/grafana/grafana && \
-  # build stable packages
-  if [ "${BUILD_TYPE}" == "stable" ] ; then \
-    echo "switch to stable Tag v${GRAFANA_VERSION}" && \
-    git checkout tags/v${GRAFANA_VERSION} 2> /dev/null ; \
-  fi && \
-  echo "grafana setup .." && \
-  cd ${GOPATH}/src/github.com/grafana/grafana && \
-  go run build.go setup  2> /dev/null && \
-  echo "grafana build .." && \
-  go run build.go build  2> /dev/null && \
-  unset GOMAXPROCS && \
-  # build frontend
-  echo "build frontend ..." && \
-  export JOBS=4 && \
-  cd ${GOPATH}/src/github.com/grafana/grafana && \
-  /usr/bin/npm install          && \
-  /usr/bin/npm install -g yarn  && \
-  /usr/bin/yarn install --pure-lockfile --no-progress && \
-  /usr/bin/npm run build && \
-  unset JOBS && \
-  # move all packages to the right place
-  cd ${GOPATH}/src/github.com/grafana/grafana && \
-  mkdir -p /usr/share/grafana/bin/ && \
-  cp -ar ${GOPATH}/src/github.com/grafana/grafana/conf               /usr/share/grafana/ && \
-  cp -a  ${GOPATH}/src/github.com/grafana/grafana/bin/grafana-cli    /usr/share/grafana/bin/ && \
-  cp -a  ${GOPATH}/src/github.com/grafana/grafana/bin/grafana-server /usr/share/grafana/bin/ && \
-  if [ -d public ] ; then \
-    cp -ar ${GOPATH}/src/github.com/grafana/grafana/public           /usr/share/grafana/ ; \
-  elif [ -d public_gen ] ; then \
-    cp -ar ${GOPATH}/src/github.com/grafana/grafana/public_gen       /usr/share/grafana/public ; \
-  fi
+STOPSIGNAL SIGQUIT
 
-RUN \
-  # install my favorite grafana plugins
-  echo "install grafana plugins ..." && \
-  for plugin in grafana-clock-panel grafana-piechart-panel jdbranham-diagram-panel mtanda-histogram-panel btplc-trend-box-panel vonage-status-panel michaeldmoore-annunciator-panel neocat-cal-heatmap-panel; \
-  do \
-     /usr/share/grafana/bin/grafana-cli --pluginsDir "/usr/share/grafana/data/plugins" plugins install ${plugin} ; \
-  done
+CMD ["nginx", "-g", "daemon off;"]
 
-CMD [ "/bin/bash" ]
-
-# ---------------------------------------------------------------------------------------
-
-FROM alpine:3.7
-
-EXPOSE 3000
-
-LABEL \
-  version="1805" \
-  maintainer="Bodo Schulz <bodo@boone-schulz.de>" \
-  org.label-schema.build-date=${BUILD_DATE} \
-  org.label-schema.name="Grafana Docker Image" \
-  org.label-schema.description="Inofficial Grafana Docker Image" \
-  org.label-schema.url="https://www.grafana.com" \
-  org.label-schema.vcs-url="https://github.com/bodsch/docker-grafana" \
-  org.label-schema.vendor="Bodo Schulz" \
-  org.label-schema.version=${GRAFANA_VERSION} \
-  org.label-schema.schema-version="1.0" \
-  com.microscaling.docker.dockerfile="/Dockerfile" \
-  com.microscaling.license="GNU Lesser General Public License v3.0"
-
-RUN \
-  apk --quiet --no-cache update && \
-  if [ -f /etc/enviroment ] ; then . /etc/enviroment; fi && \
-  apk add --quiet --no-cache \
-    bash ca-certificates curl jq mysql-client netcat-openbsd pwgen sqlite yajl-tools && \
-  # create needed directorys
-  mkdir /var/log/grafana && \
-  rm -rf \
-    /tmp/* \
-    /var/cache/apk/*
-
-COPY --from=builder /etc/enviroment /etc/enviroment
-COPY --from=builder /usr/share/grafana /usr/share/grafana
-COPY --from=builder /usr/bin/phantomjs /usr/bin/phantomjs
-
-COPY rootfs/ /
-
-VOLUME [ "/usr/share/grafana/data" "/usr/share/grafana/public/dashboards" "/opt/grafana/dashboards" ]
-
-WORKDIR /usr/share/grafana
-
-HEALTHCHECK \
-  --interval=5s \
-  --timeout=2s \
-  --retries=12 \
-  CMD curl --silent --fail localhost:3000 || exit 1
-
-CMD [ "/init/run.sh" ]
+# vim:syntax=Dockerfile
