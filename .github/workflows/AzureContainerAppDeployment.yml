@@ -24,17 +24,17 @@ jobs:
     
     - uses: azure/docker-login@v1
       with:
-        login-server: mycontainer.azurecr.io
+        login-server: cloudquicklabsacr.azurecr.io
         username: ${{ secrets.REGISTRY_USERNAME }}
         password: ${{ secrets.REGISTRY_PASSWORD }}
     - run: |
-        docker build . -t mycontainer.azurecr.io/myapp:${{ github.sha }}
-        docker push mycontainer.azurecr.io/myapp:${{ github.sha }}     
+        docker build . -t cloudquicklabsacr.azurecr.io/myapp:${{ github.sha }}
+        docker push cloudquicklabsacr.azurecr.io/myapp:${{ github.sha }}     
       
     - uses: azure/webapps-deploy@v2
       with:
         app-name: 'myapp'
-        images: 'mycontainer.azurecr.io/myapp:${{ github.sha }}'
+        images: 'cloudquicklabsacr.azurecr.io/myapp:${{ github.sha }}'
     
     - name: Azure logout
       run: |
