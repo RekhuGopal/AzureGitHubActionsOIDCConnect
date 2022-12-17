@@ -13,7 +13,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: mslearn-deploy-run-container-app-service/dotnet
+        working-directory: dotnet
     steps:
     # checkout the repo
     - name: 'Checkout GitHub Action' 
